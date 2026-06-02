@@ -14,10 +14,10 @@ jobs:
 
       - name: Clone sibling deps
         run: |
-          git clone --depth 1 --branch chore/modernize-dart3 \
+          git clone --depth 1 \
             https://github.com/xhns/bencode_dart.git \
             "$GITHUB_WORKSPACE/../bencode_dart"
-          git clone --depth 1 --branch chore/modernize-dart3 \
+          git clone --depth 1 \
             https://github.com/xhns/dartorrent_common.git \
             "$GITHUB_WORKSPACE/../dartorrent_common"
 
