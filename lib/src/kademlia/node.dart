@@ -45,8 +45,6 @@ class Node {
 
   Node(this.id, this._compactAddress,
       [this._cleanupTime = 15 * 60, this.k = 8]) {
-    assert(_cleanupTime != null && k != null,
-        'cleanup time and K can not be null');
     resetCleanupTimer();
   }
 
@@ -66,9 +64,9 @@ class Node {
   }
 
   void _cleanupMe() {
-    _cleanupHandler.forEach((element) {
+    for (var element in _cleanupHandler) {
       Timer.run(() => element(this));
-    });
+    }
   }
 
   List<Bucket?>? _getBuckets() {
@@ -121,9 +119,9 @@ class Node {
   }
 
   void _whenBucketIsEmpty(Bucket b) {
-    _bucketEmptyHandler.forEach((element) {
+    for (var element in _bucketEmptyHandler) {
       Timer.run(() => element(b.index));
-    });
+    }
   }
 
   bool onBucketEmpty(void Function(int index) h) {
@@ -131,11 +129,11 @@ class Node {
   }
 
   bool offBucketEmpty(void Function(int index) h) {
-    return _bucketEmptyHandler.add(h);
+    return _bucketEmptyHandler.remove(h);
   }
 
   bool _fillNodeList(Bucket? bucket, List<Node> target, int max) {
-    if (bucket == null || bucket.nodes == null) return target.length >= max;
+    if (bucket == null) return target.length >= max;
     for (var i = 0; i < bucket.nodes.length; i++) {
       if (target.length >= max) break;
       target.add(bucket.nodes[i]);
@@ -148,7 +146,7 @@ class Node {
   }
 
   void remove(Node node) {
-    if (_buckets == null || _buckets!.isEmpty) return null;
+    if (_buckets == null || _buckets!.isEmpty) return;
     var index = _getBucketIndex(node.id);
     var bucket = _buckets![index];
     bucket?.removeNode(node);
@@ -170,13 +168,13 @@ class Node {
   }
 
   String? toContactEncodingString() {
-    if (id == null || _compactAddress == null) return null;
-    return '${id.toString()}${_compactAddress!.toContactEncodingString()}';
+    if (_compactAddress == null) return null;
+    return '$id${_compactAddress!.toContactEncodingString()}';
   }
 
   @override
   String toString() {
-    return 'Node[id:${id?.toString()},Peer:${_compactAddress?.toString()}]';
+    return 'Node[id:$id,Peer:${_compactAddress?.toString()}]';
   }
 
   bool get isDisposed => _disposed;

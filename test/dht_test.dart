@@ -4,409 +4,456 @@ import 'dart:math';
 
 import 'package:bencode_dart/bencode_dart.dart';
 import 'package:dartorrent_common/dartorrent_common.dart';
+import 'package:dht_dart/src/kademlia/bucket.dart';
+import 'package:dht_dart/src/kademlia/distance.dart';
 import 'package:dht_dart/src/kademlia/id.dart';
 import 'package:dht_dart/src/kademlia/node.dart';
-import 'package:dht_dart/src/krpc/krpc_message.dart';
-import 'package:dht_dart/src/kademlia/bucket.dart';
 import 'package:dht_dart/src/kademlia/tree_node.dart';
+import 'package:dht_dart/src/krpc/krpc_message.dart';
 import 'package:test/test.dart';
 
+const _idLen = 20;
+
+/// Build a [Node] whose internal cleanup [Timer] is disabled (-1), so tests
+/// don't leave pending timers / hanging sockets behind.
+Node _node(ID id, [CompactAddress? addr]) => Node(id, addr, -1);
+
+/// A random ASCII string of [len] chars. The KRPC layer ships ids/tids/tokens
+/// as Dart strings through bencode, and bencode_dart now (correctly) UTF-8
+/// encodes strings — so for a lossless round-trip in assertions we keep the
+/// fixtures within the ASCII range (where UTF-8 bytes == code units).
+String _ascii(int len) {
+  final r = Random();
+  return String.fromCharCodes(List<int>.generate(len, (_) => 33 + r.nextInt(94)));
+}
+
 void main() {
-  group('some inner test', () {
-    test('random id', () {
-      void _createPartSameId(int index) {
-        var l = index + 1;
-        index = 159 - index;
-        var id = ID.randomID(20);
-        var n = index ~/ 8; //相同数字个数
-        var offset = index.remainder(8); // 第一个不相同数字的前面多少bit相同
-        var newId = List<int>.filled(20,0);
+  group('ID', () {
+    test('randomID has the requested byte length', () {
+      expect(ID.randomID(_idLen).byteLength, _idLen);
+      expect(ID.randomID(2).byteLength, 2);
+    });
+
+    test('differentLength is 0 for equal ids and full for opposite ids', () {
+      final id = ID.randomID(_idLen);
+      expect(id.differentLength(id), 0);
+
+      // Bit-flip every byte -> the very first bit differs -> full length.
+      final flipped = List<int>.generate(_idLen, (i) => id.getValueAt(i) ^ 0xFF);
+      expect(id.differentLength(ID.createID(flipped)), _idLen * 8);
+    });
+
+    test('differentLength matches the shared-prefix-bit construction', () {
+      // For every possible shared-prefix length, build an id that shares
+      // exactly that many leading bits with a random id and assert the
+      // reported "different length" (suffix length) is what we expect.
+      void check(int sharedPrefixBits) {
+        final expectedDiff = (_idLen * 8) - sharedPrefixBits;
+        final id = ID.randomID(_idLen);
+        final newId = List<int>.filled(_idLen, 0);
+        final wholeSameBytes = sharedPrefixBits ~/ 8;
+        final bitsIntoNextByte = sharedPrefixBits.remainder(8);
+
         var j = 0;
-        for (; j < n; j++) {
+        for (; j < wholeSameBytes; j++) {
           newId[j] = id.getValueAt(j);
         }
         if (j >= id.byteLength) return;
-        var fna = id.getValueAt(j);
-        var fnb = 0;
-        for (var i = 0; i < offset; i++) {
-          var base = 128;
-          base = base >> i;
-          var a = base & fna;
-          fnb = fnb | a;
+
+        final src = id.getValueAt(j);
+        var b = 0;
+        // Copy the matching high bits.
+        for (var i = 0; i < bitsIntoNextByte; i++) {
+          b |= (128 >> i) & src;
         }
-        for (var i = offset; i < 8; i++) {
-          var base = 128;
-          base = base >> i;
-          var a = base & fna;
-          if (a == 0) {
-            fnb = fnb | base;
-          }
+        // Flip the first differing bit (and any following ones that were 0).
+        for (var i = bitsIntoNextByte; i < 8; i++) {
+          final base = 128 >> i;
+          if (src & base == 0) b |= base;
         }
-        newId[j] = fnb;
-        var r = Random();
-        for (var i = j + 1; i < 20; i++) {
+        newId[j] = b;
+        final r = Random();
+        for (var i = j + 1; i < _idLen; i++) {
           newId[i] = r.nextInt(256);
         }
-        var nid = ID.createID(newId);
-
-        assert(nid.differentLength(id) == l);
+        expect(ID.createID(newId).differentLength(id), expectedDiff);
       }
 
-      for (var i = -1; i < 160; i++) {
-        _createPartSameId(i);
+      for (var sharedPrefixBits = 0;
+          sharedPrefixBits < _idLen * 8;
+          sharedPrefixBits++) {
+        check(sharedPrefixBits);
       }
+    });
+
+    test('equality and XOR distance', () {
+      final a = ID.createID(List<int>.filled(_idLen, 0));
+      final b = ID.createID(List<int>.filled(_idLen, 0));
+      expect(a == b, isTrue);
+      expect(a.hashCode, b.hashCode);
+
+      // Distance(a, a) is all-zero, Distance(a, b) is the XOR.
+      final selfDistance = a.distanceBetween(a);
+      for (var i = 0; i < selfDistance.byteLength; i++) {
+        expect(selfDistance.getValue(i), 0);
+      }
+
+      final x = ID.createID(List<int>.generate(_idLen, (i) => i));
+      final y = ID.createID(List<int>.generate(_idLen, (i) => 0xFF - i));
+      final d = x.distanceBetween(y);
+      for (var i = 0; i < _idLen; i++) {
+        expect(d.getValue(i), i ^ (0xFF - i));
+      }
+    });
+
+    test('Distance equality compares value-wise', () {
+      final d1 = Distance([1, 2, 3]);
+      final d2 = Distance([1, 2, 3]);
+      final d3 = Distance([1, 2, 4]);
+      expect(d1 == d2, isTrue);
+      expect(d1 == d3, isFalse);
     });
   });
 
-  group('PeerValue - ', () {
-    test('Create/Parse', () {
-      var peerValue =
-          CompactAddress(InternetAddress.tryParse('128.2.1.3')!, 12311);
-      var bytes = peerValue.toBytes();
-      var p2 = CompactAddress.parseIPv4Address(bytes);
-      assert(
-          p2!.port == peerValue.port &&
-              p2.addressString == peerValue.addressString,
-          'Parse error');
+  group('CompactAddress (compact node/peer info)', () {
+    test('IPv4 round-trip through bytes', () {
+      final addr = CompactAddress(InternetAddress.tryParse('128.2.1.3')!, 12311);
+      final parsed = CompactAddress.parseIPv4Address(addr.toBytes())!;
+      expect(parsed.port, addr.port);
+      expect(parsed.addressString, addr.addressString);
     });
 
-    test('Contact encoding string', () {
-      var peerValue =
-          CompactAddress(InternetAddress.tryParse('128.2.1.3')!, 12311);
-      var str = peerValue.toContactEncodingString();
-      var bs = latin1.encode(str!);
-      assert(bs.length == 6);
-      var p2 = CompactAddress.parseIPv4Address(bs);
-      assert(
-          (p2!.port == peerValue.port) &&
-              (p2.addressString == peerValue.addressString) &&
-              (str == p2.toContactEncodingString()),
-          'Parse error');
+    test('contact-encoding string is 6 bytes and round-trips', () {
+      final addr = CompactAddress(InternetAddress.tryParse('128.2.1.3')!, 12311);
+      final str = addr.toContactEncodingString()!;
+      final bytes = latin1.encode(str);
+      expect(bytes.length, 6);
+
+      final parsed = CompactAddress.parseIPv4Address(bytes)!;
+      expect(parsed.port, addr.port);
+      expect(parsed.addressString, addr.addressString);
+      expect(parsed.toContactEncodingString(), str);
     });
 
-    test('Parse More than one', () {
-      var r = Random();
-      var n = 10;
-      var testBytes = <int>[];
-      for (var i = 0; i < n; i++) {
-        for (var j = 0; j < 6; j++) {
-          testBytes.add(r.nextInt(256));
-        }
+    test('parses many concatenated 6-byte addresses by offset', () {
+      final r = Random();
+      const n = 10;
+      final bytes = <int>[];
+      for (var i = 0; i < n * 6; i++) {
+        bytes.add(r.nextInt(256));
       }
-      var offset = 0;
-      for (var i = 0; i < n; i++, offset += 6) {
-        var p2 = CompactAddress.parseIPv4Address(testBytes, offset);
-        var b = p2!.toBytes();
+      for (var i = 0, offset = 0; i < n; i++, offset += 6) {
+        final parsed = CompactAddress.parseIPv4Address(bytes, offset)!;
+        final out = parsed.toBytes();
         for (var h = 0; h < 6; h++) {
-          assert(b[h] == testBytes[offset + h]);
+          expect(out[h], bytes[offset + h]);
         }
       }
     });
   });
 
-  group('binary tree test ', () {
-    var idByteLength = 20;
-    test('bucket', () {
+  group('Bucket (k-bucket binary tree)', () {
+    late Bucket bucket;
+
+    tearDown(() => bucket.dispose());
+
+    test('bucketMaxSize grows then caps at the configured k', () {
       for (var i = 0; i < 160; i++) {
-        print(Bucket(i, 100).bucketMaxSize);
+        final b = Bucket(i, 8);
+        final expected = i > 62 ? 8 : min(8, pow(2, i).toInt());
+        expect(b.bucketMaxSize, expected);
+        b.dispose();
+      }
+      bucket = Bucket(0); // satisfy tearDown
+    });
+
+    test('add ignores null and tracks count', () {
+      bucket = Bucket(5);
+      expect(bucket.addNode(null), isNull);
+      expect(bucket.isEmpty, isTrue);
+      expect(bucket.count, 0);
+
+      final n1 = _node(ID.randomID(_idLen));
+      final n2 = _node(ID.randomID(_idLen));
+      expect(bucket.addNode(n1), isNotNull);
+      expect(bucket.addNode(n2), isNotNull);
+      expect(bucket.addNode(null), isNull);
+      expect(bucket.isNotEmpty, isTrue);
+      expect(bucket.count, 2);
+    });
+
+    test('a node lands at the tree path matching its id bits', () {
+      bucket = Bucket(5);
+      final node = _node(ID.randomID(_idLen));
+      final tn = bucket.addNode(node)!;
+
+      // Walk up from the leaf collecting left(=1)/right(=0) edges.
+      List<bool> pathToBits(TreeNode leaf) {
+        final bits = <bool>[];
+        var cur = leaf;
+        while (cur.parent != null) {
+          final parent = cur.parent!;
+          bits.insert(0, parent.left == cur); // left => 1, right => 0
+          cur = parent;
+        }
+        return bits;
+      }
+
+      final bits = pathToBits(tn);
+      expect(bits.length, _idLen * 8);
+
+      // Reconstruct the id bytes from the collected bits (little-endian byte
+      // order, matching the tree construction in Bucket).
+      final rebuilt = <int>[];
+      for (var i = 0; i < _idLen; i++) {
+        var v = 0;
+        for (var j = 0; j < 8; j++) {
+          v = (v << 1) | (bits[i * 8 + j] ? 1 : 0);
+        }
+        rebuilt.insert(0, v);
+      }
+      for (var i = 0; i < rebuilt.length; i++) {
+        expect(rebuilt[i], node.id.getValueAt(i));
       }
     });
 
-    test('add node', () {
-      var root = Bucket(5);
-      var node = Node(ID.randomID(idByteLength), null);
-      var node2 = Node(ID.randomID(idByteLength), null);
+    test('findNode locates the exact node only', () {
+      bucket = Bucket(5);
+      final id1 = ID.randomID(_idLen);
+      final id2 = ID.randomID(_idLen);
+      final n1 = _node(id1);
+      final n2 = _node(id2);
+      bucket.addNode(n1);
+      bucket.addNode(n2);
 
-      var nullNode = root.addNode(null);
-      assert(nullNode == null);
-      assert(root.isEmpty, 'unknown error');
-      assert(root.count == 0, 'unknown error');
-      var tn = root.addNode(node);
-      var tn2 = root.addNode(node2);
-      assert(root.addNode(null) == null);
-      assert(root.isNotEmpty);
-      assert(root.count == 2);
-      var func;
-      func = (TreeNode node, List<bool> re) {
-        if (node.parent != null) {
-          if (node.parent!.left == node) {
-            re.insert(0, true);
-          }
-          if (node.parent!.right == node) {
-            re.insert(0, false);
-          }
-        } else {
-          return re;
-        }
-        return func(node.parent, re);
-      };
-
-      var r = func(tn, <bool>[]);
-      var r2 = func(tn2, <bool>[]);
-      assert(r.length == idByteLength * 8, 'unknown error');
-      var func2 = (List<bool> r) {
-        var rN = <int>[];
-        for (var i = 0; i < idByteLength; i++) {
-          var s = '';
-          for (var j = 0; j < 8; j++) {
-            if (r[i * 8 + j]) {
-              s += '1';
-            } else {
-              s += '0';
-            }
-          }
-          rN.insert(0, int.parse(s, radix: 2));
-        }
-        return rN;
-      };
-      var rN = func2(r);
-      var rN2 = func2(r2);
-      for (var i = 0; i < rN.length; i++) {
-        assert(
-            (rN[i] == node.id.getValueAt(i)) &&
-                (rN2[i] == node2.id.getValueAt(i)),
-            'create binary tree error');
-      }
+      expect(bucket.findNode(ID.randomID(_idLen)), isNull);
+      expect(bucket.findNode(id1)!.node, n1);
+      expect(bucket.findNode(id2)!.node, n2);
+      expect(bucket.findNode(id2)!.node, isNot(n1));
     });
 
-    test('find node', () {
-      var root = Bucket(5);
-      var id1 = ID.randomID(idByteLength);
-      var id2 = ID.randomID(idByteLength);
-      var id3 = ID.randomID(idByteLength);
-      var node = Node(id1, null);
-      var node2 = Node(id2, null);
-      var node3 = Node(id3, null);
-      root.addNode(node);
-      root.addNode(node2);
-      root.addNode(node3);
-      assert(root.findNode(ID.randomID(idByteLength)) == null,
-          'its impossible! unless the random bytes is same');
-      assert(root.findNode(id1)!.node == node, 'search error');
-      assert(root.findNode(id2)!.node != node, 'search error');
-      assert(root.findNode(id2)!.node == node2, 'search error');
-    });
+    test('removeNode by Node / TreeNode / ID and empties the bucket', () {
+      bucket = Bucket(5);
+      final id1 = ID.randomID(_idLen);
+      final id2 = ID.randomID(_idLen);
+      final id3 = ID.randomID(_idLen);
 
-    test('remove node', () {
-      var root = Bucket(5);
-      var id1 = ID.randomID(idByteLength);
-      var id2 = ID.randomID(idByteLength);
-      var id3 = ID.randomID(idByteLength);
-      var nullNode = root.removeNode(id1);
-      assert(nullNode == null);
-      assert(root.isEmpty);
-      var node = Node(id1, null);
-      var node2 = Node(id2, null);
-      var node3 = Node(id3, null);
-      var tn1 = root.addNode(node);
-      var tn2 = root.addNode(node2);
-      var tn3 = root.addNode(node3);
+      expect(bucket.removeNode(id1), isNull);
+      expect(bucket.isEmpty, isTrue);
 
-      assert(root.removeNode(node) == tn1);
-      assert(root.isNotEmpty && root.count == 2);
-      assert(root.removeNode(tn2) == tn2);
-      assert(root.isNotEmpty && root.count == 1);
-      assert(root.removeNode(node3.id) == tn3);
-      assert(root.isEmpty);
+      final n1 = _node(id1);
+      final n2 = _node(id2);
+      final n3 = _node(id3);
+      final tn1 = bucket.addNode(n1);
+      final tn2 = bucket.addNode(n2);
+      final tn3 = bucket.addNode(n3);
 
-      nullNode = root.removeNode(id1);
-      assert(nullNode == null);
-      assert(root.isEmpty);
+      expect(bucket.removeNode(n1), tn1); // by Node
+      expect(bucket.count, 2);
+      expect(bucket.removeNode(tn2), tn2); // by TreeNode
+      expect(bucket.count, 1);
+      expect(bucket.removeNode(n3.id), tn3); // by ID
+      expect(bucket.isEmpty, isTrue);
+
+      expect(bucket.removeNode(id1), isNull);
     });
   });
 
-  group('Nodes - ', () {
-    test(' ID compare', () {
-      var id = ID.randomID(20);
-      var root = Node(id, null);
-      var target = Node(id, null);
-      assert(root.id.differentLength(target.id) == 0);
+  group('Node routing', () {
+    test('differentLength is symmetric and bounded by one byte change', () {
+      final id = ID.randomID(_idLen);
+      final root = _node(id);
+      addTearDown(root.dispose);
+      expect(root.id.differentLength(id), 0);
 
-      var id2 = <int>[];
-      for (var i = 0; i < root.id.byteLength - 1; i++) {
-        id2.add(root.id.getValueAt(i));
+      // Change only the last byte -> at most 8 bits differ.
+      final bytes = [
+        for (var i = 0; i < _idLen - 1; i++) id.getValueAt(i),
+      ];
+      final last = id.getValueAt(_idLen - 1);
+      var newLast = Random().nextInt(256);
+      while (newLast == last) {
+        newLast = Random().nextInt(256);
       }
-      var last = root.id.getValueAt(19);
-      var l = Random().nextInt(256);
-      while (l == last) {
-        l = Random().nextInt(256);
-      }
-      id2.add(l);
-
-      assert(root.id.differentLength(ID.createID(id2)) <= 8);
+      bytes.add(newLast);
+      expect(root.id.differentLength(ID.createID(bytes)) <= 8, isTrue);
     });
 
-    test(' Find closest', () {
-      var count = 40;
-      var root = Node(ID.randomID(20), null);
-      for (var i = 0; i < count; i++) {
-        var n = Node(ID.randomID(20), null);
-        root.add(n);
+    test('findClosestNodes returns up to k nodes', () {
+      final root = _node(ID.randomID(_idLen));
+      addTearDown(root.dispose);
+      for (var i = 0; i < 40; i++) {
+        root.add(_node(ID.randomID(_idLen)));
       }
-      var id = <int>[];
-      for (var i = 0; i < root.id.byteLength - 1; i++) {
-        id.add(root.id.getValueAt(i));
-      }
-      var last = root.id.getValueAt(19);
-      var l = Random().nextInt(256);
-      while (l == last) {
-        l = Random().nextInt(256);
-      }
-      id.add(l);
-      var target = Node(ID.createID(id), null);
-      var re = root.findClosestNodes(target.id);
-      assert(re!.length == 8);
+      final closest = root.findClosestNodes(ID.randomID(_idLen))!;
+      expect(closest.length, 8); // default k
     });
   });
 
-  group('KRPC - ', () {
-    test('ping message', () {
-      var testId = ID.randomID(2);
-      var tid = testId.toString();
-      var nid = ID.randomID(20).toString();
-      var bytes = pingMessage(tid, nid);
-      var obj = decode(bytes);
-      assert(String.fromCharCodes(obj['y']) == 'q', 'y error');
-      assert(String.fromCharCodes(obj['q']) == 'ping', 'q error');
-      assert(String.fromCharCodes(obj['t']) == tid, 'transaction id error');
-      assert(String.fromCharCodes(obj['a']['id']) == nid, 'node id error');
+  group('KRPC messages', () {
+    test('ping query', () {
+      final tid = ID.randomID(2).toString();
+      final nid = _ascii(_idLen);
+      final obj = decode(pingMessage(tid, nid)!) as Map;
+      expect(String.fromCharCodes(obj['y']), 'q');
+      expect(String.fromCharCodes(obj['q']), 'ping');
+      expect(String.fromCharCodes(obj['t']), tid);
+      expect(String.fromCharCodes(obj['a']['id']), nid);
     });
 
-    test('ping response', () {
-      var testId = ID.randomID(2);
-      var tid = testId.toString();
-      var nid = ID.randomID(20).toString();
-      var bytes = pongMessage(tid, nid);
-      var obj = decode(bytes);
-      assert(String.fromCharCodes(obj['y']) == 'r', 'y error');
-      assert(String.fromCharCodes(obj['t']) == tid, 'transaction id error');
-      assert(String.fromCharCodes(obj['r']['id']) == nid, 'node id error');
+    test('ping (pong) response', () {
+      final tid = _ascii(2);
+      final nid = _ascii(_idLen);
+      final obj = decode(pongMessage(tid, nid)!) as Map;
+      expect(String.fromCharCodes(obj['y']), 'r');
+      expect(String.fromCharCodes(obj['t']), tid);
+      expect(String.fromCharCodes(obj['r']['id']), nid);
     });
 
-    test('find_node message', () {
-      var testId = ID.randomID(2);
-      var tid = testId.toString();
-      var nid = ID.randomID(20).toString();
-      var bytes = findNodeMessage(tid, nid, nid);
-      var obj = decode(bytes);
-      assert(String.fromCharCodes(obj['y']) == 'q', 'y error');
-      assert(String.fromCharCodes(obj['q']) == 'find_node', 'q error');
-      assert(String.fromCharCodes(obj['t']) == tid, 'transaction id error');
-      assert(String.fromCharCodes(obj['a']['id']) == nid, 'node id error');
-      assert(
-          String.fromCharCodes(obj['a']['target']) == nid, 'target id error');
+    test('find_node query', () {
+      final tid = _ascii(2);
+      final nid = _ascii(_idLen);
+      final obj = decode(findNodeMessage(tid, nid, nid)!) as Map;
+      expect(String.fromCharCodes(obj['y']), 'q');
+      expect(String.fromCharCodes(obj['q']), 'find_node');
+      expect(String.fromCharCodes(obj['t']), tid);
+      expect(String.fromCharCodes(obj['a']['id']), nid);
+      expect(String.fromCharCodes(obj['a']['target']), nid);
     });
 
-    test('find_node message', () {
-      var testId = ID.randomID(2);
-      var tid = testId.toString();
-      var nid = ID.randomID(20).toString();
-      var nodes = <Node>[];
-      nodes.add(Node(ID.randomID(20),
-          CompactAddress(InternetAddress.tryParse('120.0.0.1')!, 2222)));
-      nodes.add(Node(ID.randomID(20),
-          CompactAddress(InternetAddress.tryParse('196.168.0.1')!, 2223)));
-      var bytes = findNodeResponse(tid, nid, nodes);
-      var obj = decode(bytes);
-      assert(String.fromCharCodes(obj['y']) == 'r', 'y error');
-      assert(String.fromCharCodes(obj['t']) == tid, 'transaction id error');
-      assert(String.fromCharCodes(obj['r']['id']) == nid, 'node id error');
-      var nodeBytes = obj['r']['nodes'];
-      assert(nodeBytes.length == 26 * nodes.length);
-      var rns = [];
+    test('find_node response carries one compact-info blob per node', () {
+      final tid = _ascii(2);
+      final nid = _ascii(_idLen);
+      final nodes = <Node>[
+        _node(ID.randomID(_idLen),
+            CompactAddress(InternetAddress.tryParse('120.0.0.1')!, 2222)),
+        _node(ID.randomID(_idLen),
+            CompactAddress(InternetAddress.tryParse('196.168.0.1')!, 2223)),
+      ];
+      addTearDown(() {
+        for (final n in nodes) {
+          n.dispose();
+        }
+      });
+
+      final obj = decode(findNodeResponse(tid, nid, nodes)!) as Map;
+      expect(String.fromCharCodes(obj['y']), 'r');
+      expect(String.fromCharCodes(obj['t']), tid);
+      expect(String.fromCharCodes(obj['r']['id']), nid);
+
+      // bencode_dart ships strings as UTF-8, so the binary compact-info blob
+      // comes back UTF-8-encoded; recover the original latin1 bytes first.
+      final nodeBytes = _recoverBinary(obj['r']['nodes'] as List<int>);
+      expect(nodeBytes.length, 26 * nodes.length);
+
+      final decoded = <Node>[];
       for (var i = 0; i < nodeBytes.length; i += 26) {
-        var id = ID.createID(nodeBytes, i, 20);
-        var peerValue = CompactAddress.parseIPv4Address(nodeBytes, i + 20);
-        rns.add(Node(id, peerValue));
+        final id = ID.createID(nodeBytes, i, 20);
+        final addr = CompactAddress.parseIPv4Address(nodeBytes, i + 20);
+        decoded.add(_node(id, addr));
       }
-      assert(rns.length == nodes.length);
-      for (var i = 0; i < rns.length; i++) {
-        var n1 = nodes[i];
-        var n2 = rns[i];
-        assert(n1.id == n2.id);
-        assert(n1.address == n2.address);
-        assert(n1.port == n2.port);
-      }
-    });
-
-    test('get_peers message', () {
-      var testId = ID.randomID(2);
-      var tid = testId.toString();
-      var nid = ID.randomID(20).toString();
-      var infoHash = ID.randomID(20).toString();
-      var bytes = getPeersMessage(tid, nid, infoHash);
-      var obj = decode(bytes);
-      assert(String.fromCharCodes(obj['y']) == 'q', 'y error');
-      assert(String.fromCharCodes(obj['q']) == 'get_peers', 'q error');
-      assert(String.fromCharCodes(obj['t']) == tid, 'transaction id error');
-      assert(String.fromCharCodes(obj['a']['id']) == nid, 'node id error');
-      assert(
-          String.fromCharCodes(obj['a']['info_hash']).length == 20 &&
-              String.fromCharCodes(obj['a']['info_hash']) == infoHash,
-          'info_hash id error');
-    });
-
-    test('get_peers response1', () {
-      var testId = ID.randomID(2);
-      var tid = testId.toString();
-      var nid = ID.randomID(20).toString();
-      var peers = <CompactAddress>[];
-
-      var r = Random();
-      var n = 10;
-      var testBytes = <int>[];
-      for (var i = 0; i < n; i++) {
-        for (var j = 0; j < 6; j++) {
-          testBytes.add(r.nextInt(256));
+      addTearDown(() {
+        for (final n in decoded) {
+          n.dispose();
         }
+      });
+      expect(decoded.length, nodes.length);
+      for (var i = 0; i < decoded.length; i++) {
+        expect(decoded[i].id, nodes[i].id);
+        expect(decoded[i].address, nodes[i].address);
+        expect(decoded[i].port, nodes[i].port);
       }
-      var offset = 0;
-      for (var i = 0; i < n; i++, offset += 6) {
-        peers.add(CompactAddress.parseIPv4Address(testBytes, offset)!);
-      }
+    });
 
-      var bytes = getPeersResponse(tid, nid, 'token', peers: peers);
-      var obj = decode(bytes);
-      assert(String.fromCharCodes(obj['y']) == 'r', 'y error');
-      assert(String.fromCharCodes(obj['t']) == tid, 'transaction id error');
-      assert(String.fromCharCodes(obj['r']['id']) == nid, 'node id error');
-      assert(obj['r']['values'].length == n);
+    test('get_peers query', () {
+      final tid = _ascii(2);
+      final nid = _ascii(_idLen);
+      final infoHash = _ascii(_idLen);
+      final obj = decode(getPeersMessage(tid, nid, infoHash)!) as Map;
+      expect(String.fromCharCodes(obj['y']), 'q');
+      expect(String.fromCharCodes(obj['q']), 'get_peers');
+      expect(String.fromCharCodes(obj['t']), tid);
+      expect(String.fromCharCodes(obj['a']['id']), nid);
+      final ih = String.fromCharCodes(obj['a']['info_hash']);
+      expect(ih.length, 20);
+      expect(ih, infoHash);
+    });
 
-      var pbs = obj['r']['values'];
-      for (var i = 0; i < pbs.length; i++) {
-        var ps = pbs[i];
-        var p = CompactAddress.parseIPv4Address(ps);
-        assert(peers[i].addressString == p!.addressString);
-        assert(peers[i].port == p!.port);
+    test('get_peers response carries one value per peer', () {
+      final tid = _ascii(2);
+      final nid = _ascii(_idLen);
+      final r = Random();
+      const n = 10;
+      final raw = <int>[];
+      for (var i = 0; i < n * 6; i++) {
+        raw.add(r.nextInt(256));
       }
+      final peers = <CompactAddress>[
+        for (var i = 0, off = 0; i < n; i++, off += 6)
+          CompactAddress.parseIPv4Address(raw, off)!,
+      ];
+
+      final obj =
+          decode(getPeersResponse(tid, nid, 'token', peers: peers)!) as Map;
+      expect(String.fromCharCodes(obj['y']), 'r');
+      expect(String.fromCharCodes(obj['t']), tid);
+      expect(String.fromCharCodes(obj['r']['id']), nid);
+      expect(String.fromCharCodes(obj['r']['token']), 'token');
+
+      final values = obj['r']['values'] as List;
+      expect(values.length, n);
+      for (var i = 0; i < values.length; i++) {
+        // Recover the original 6 latin1 bytes (UTF-8-mangled on the wire).
+        final bytes = _recoverBinary(values[i] as List<int>);
+        final parsed = CompactAddress.parseIPv4Address(bytes)!;
+        expect(parsed.addressString, peers[i].addressString);
+        expect(parsed.port, peers[i].port);
+      }
+    });
+
+    test('announce_peer query carries token, port and implied_port', () {
+      final tid = _ascii(2);
+      final nid = _ascii(_idLen);
+      final infoHash = _ascii(_idLen);
+      final obj =
+          decode(announcePeerMessage(tid, nid, infoHash, 6881, 'tok')!) as Map;
+      expect(String.fromCharCodes(obj['y']), 'q');
+      expect(String.fromCharCodes(obj['q']), 'announce_peer');
+      expect(String.fromCharCodes(obj['a']['id']), nid);
+      expect(String.fromCharCodes(obj['a']['info_hash']), infoHash);
+      expect(obj['a']['port'], 6881);
+      expect(obj['a']['implied_port'], 1);
+      expect(String.fromCharCodes(obj['a']['token']), 'tok');
+    });
+
+    test('error message', () {
+      final tid = _ascii(2);
+      final obj = decode(errorMessage(tid, 201, 'Generic Error')!) as Map;
+      expect(String.fromCharCodes(obj['y']), 'e');
+      expect(obj['e'][0], 201);
+      expect(String.fromCharCodes(obj['e'][1]), 'Generic Error');
+    });
+
+    // Documents a known interop caveat: KRPC carries binary (node ids, compact
+    // info) as Dart strings, and bencode_dart UTF-8-encodes strings. So bytes
+    // >= 0x80 are widened on the wire and must be recovered before parsing.
+    test('binary-in-string is UTF-8 widened by bencode (known caveat)', () {
+      final addr =
+          CompactAddress(InternetAddress.tryParse('128.2.1.3')!, 12311);
+      final original = latin1.encode(addr.toContactEncodingString()!);
+      expect(original.length, 6);
+
+      final obj = decode(
+              getPeersResponse(_ascii(2), _ascii(_idLen), 'tok', peers: [addr])!)
+          as Map;
+      final onWire = (obj['r']['values'] as List).first as List<int>;
+      expect(onWire.length, greaterThan(6)); // widened
+      expect(_recoverBinary(onWire), original); // recoverable
     });
   });
 }
 
-String idListToRadix2String(List<int> id) {
-  var s = '';
-  for (var i = id.length - 1; i >= 0; i--) {
-    s = '$s${intToRadix2String(id[i])}';
-  }
-  return s;
-}
-
-String intToRadix2String(int element) {
-  var s = element.toRadixString(2);
-  if (s.length != 8) {
-    var l = s.length;
-    for (var i = 0; i < 8 - l; i++) {
-      s = '${0}$s';
-    }
-  }
-  return s;
-}
-
-List<int> randomBytes(count) {
-  var random = Random();
-  var bytes = List<int>.filled(count,0);
-  for (var i = 0; i < count; i++) {
-    bytes[i] = random.nextInt(254);
-  }
-  return bytes;
-}
+/// Reverses bencode_dart's UTF-8 string encoding to recover the original
+/// latin1 byte sequence that the KRPC layer fed in as a Dart string.
+List<int> _recoverBinary(List<int> utf8Bytes) =>
+    latin1.encode(utf8.decode(utf8Bytes));

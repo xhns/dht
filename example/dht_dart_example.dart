@@ -1,42 +1,31 @@
 import 'dart:developer' as dev;
-import 'package:dartorrent_common/dartorrent_common.dart';
 
+import 'package:dartorrent_common/dartorrent_common.dart';
 import 'package:dht_dart/dht_dart.dart';
-import 'package:torrent_model/torrent_model.dart';
 
 void main() async {
-  var torrent = await Torrent.parse('example/test7.torrent');
-  var infohashStr = String.fromCharCodes(torrent.infoHashBuffer as Iterable<int>);
+  // A torrent infohash is a 20-byte string. Replace these bytes with the
+  // infohash of the torrent you want to find peers for. (Parsing a real
+  // `.torrent` file is left to a torrent-model package and is intentionally
+  // omitted here to keep the example free of extra dependencies.)
+  var infohashStr = String.fromCharCodes(List<int>.filled(20, 0));
+
   var dht = DHT();
-  var test = <CompactAddress>{};
+  var peers = <CompactAddress>{};
   dht.announce(infohashStr, 22123);
   dht.onError((code, msg) {
     dev.log('Error happend:', error: '[$code]$msg');
   });
   dht.onNewPeer((peer, token) {
-    if (test.add(peer)) {
+    if (peers.add(peer)) {
       dev.log(
-          'Found new peer address : $peer  ， Have ${test.length} peers already');
+          'Found new peer address : $peer  ， Have ${peers.length} peers already');
     }
   });
 
   await dht.bootstrap(udpTimeout: 5, cleanNodeTime: 5 * 60);
-  torrent.nodes.forEach((url) async {
-    dht.addBootstrapNode(url);
-  });
 
   Future.delayed(Duration(seconds: 10), () {
     dht.stop();
   });
-}
-
-String intToRadix2String(int element) {
-  var s = element.toRadixString(2);
-  if (s.length != 8) {
-    var l = s.length;
-    for (var i = 0; i < 8 - l; i++) {
-      s = '${0}$s';
-    }
-  }
-  return s;
 }

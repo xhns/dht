@@ -55,7 +55,7 @@ class TreeNode {
     var index = offset ~/ 8;
     var n = offset.remainder(8);
     var number = id.getValueAt(id.byteLength - index - 1);
-    var base = BASE_NUM;
+    var base = baseNum;
     base = base >> n;
     TreeNode? next;
     // TreeNode another;
