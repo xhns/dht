@@ -409,17 +409,19 @@ class _KRPC implements KRPC {
     _socket!.listen((event) {
       if (event == RawSocketEvent.read) {
         var datagram = _socket!.receive();
-        Timer.run(() {
-          try {
-            if(datagram != null) {
-              _processReceiveData(
-                  datagram.address, datagram.port, datagram.data);
-            }
-          } catch (e) {
-            log('Process Receive Message Error $e',
-                error: e, name: runtimeType.toString());
-         }
-        });
+        // Process the datagram directly in the socket-read callback instead of
+        // deferring via a per-packet Timer.run. Re-entrancy isn't required here
+        // (the read callback is the natural place to handle one packet), and
+        // this removes a Timer allocation on every inbound datagram.
+        try {
+          if (datagram != null) {
+            _processReceiveData(
+                datagram.address, datagram.port, datagram.data);
+          }
+        } catch (e) {
+          log('Process Receive Message Error $e',
+              error: e, name: runtimeType.toString());
+        }
       }
     },
         onDone: () => stop('Remote/Local close the socket'),
@@ -572,17 +574,22 @@ class _KRPC implements KRPC {
   void _fireResponse(EVENT event, List<int> nodeIdBytes,
       InternetAddress address, int port, dynamic response) {
     var handlers = _responseHandlers[event];
+    // Dispatch directly — the response processors (DHT._processXxx) defer their
+    // own outbound sends and user callbacks via Timer.run, so they don't
+    // synchronously re-enter KRPC here. Saves a Timer per handler per packet.
     handlers?.forEach((handle) {
-      Timer.run(() => handle(nodeIdBytes, address, port, response));
+      handle(nodeIdBytes, address, port, response);
     });
   }
 
   void _fireQuery(EVENT event, List<int> nodeIdBytes, String transactionId,
       InternetAddress address, int port, dynamic arguments) {
     var handlers = _queryHandlers[event];
+    // Dispatch directly — query processors (DHT._processXxxRequest) defer their
+    // outbound sends/user callbacks via Timer.run, so no synchronous re-entry
+    // into KRPC. Saves a Timer per handler per packet.
     handlers?.forEach((handle) {
-      Timer.run(
-          () => handle(nodeIdBytes, transactionId, address, port, arguments));
+      handle(nodeIdBytes, transactionId, address, port, arguments);
     });
   }
 

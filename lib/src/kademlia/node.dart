@@ -30,6 +30,13 @@ class Node {
 
   List<Bucket?>? _buckets;
 
+  /// O(1) membership index of nodes added under this (root) node, keyed by the
+  /// child node id's bytes-as-string ([ID.toString]). This mirrors what the
+  /// bit-tree holds but avoids the up-to-160-frame recursive [Bucket.findNode]
+  /// walk on the per-datagram membership check (see [indexOf]). The bit-tree is
+  /// still the source of truth for closest-node queries.
+  final Map<String, Node> _knownNodes = <String, Node>{};
+
   InternetAddress get address => _compactAddress!.address;
 
   int get port => _compactAddress!.port;
@@ -83,7 +90,33 @@ class Node {
     bucket ??= Bucket(index, k);
     buckets[index] = bucket;
     bucket.onEmpty(_whenBucketIsEmpty);
-    return bucket.addNode(node) != null;
+    var added = bucket.addNode(node) != null;
+    if (added) {
+      // Keep the O(1) membership index in sync with the tree. Drop the entry
+      // when the child node is cleaned up so [indexOf] never returns a stale
+      // node the tree has already evicted.
+      _knownNodes[node.id.toString()] = node;
+      node.onTimeToCleanup(_removeFromIndex);
+    }
+    return added;
+  }
+
+  void _removeFromIndex(Node node) {
+    node.offTimeToCleanup(_removeFromIndex);
+    var key = node.id.toString();
+    if (identical(_knownNodes[key], node)) {
+      _knownNodes.remove(key);
+    }
+  }
+
+  /// O(1) membership lookup for [id] among nodes added under this node.
+  ///
+  /// Equivalent to [findNode] for the "is this id known?" question, but without
+  /// the recursive bit-tree walk. Returns `this` when [id] equals this node's
+  /// own id (mirroring [findNode]'s `index == -1` case).
+  Node? indexOf(ID id) {
+    if (id == this.id) return this;
+    return _knownNodes[id.toString()];
   }
 
   Node? findNode(ID id) {
@@ -150,6 +183,7 @@ class Node {
     var index = _getBucketIndex(node.id);
     var bucket = _buckets![index];
     bucket?.removeNode(node);
+    _removeFromIndex(node);
   }
 
   void forEach(void Function(Node node)? processor) {
@@ -188,6 +222,7 @@ class Node {
     _cleanupHandler.clear();
     token.clear();
     announced.clear();
+    _knownNodes.clear();
 
     if (_buckets != null) {
       for (var i = 0; i < _buckets!.length; i++) {

@@ -41,6 +41,16 @@ class DHT {
 
   final int _maxPeerNum = 7;
 
+  /// Cap on how many table nodes a single empty-bucket refresh will re-query.
+  /// A bucket-empty event used to fan find_node out over the *whole* routing
+  /// table; capping bounds the per-event request burst.
+  static const int _maxRefreshNodes = 8;
+
+  /// Bucket indices with a refresh already scheduled this tick. Coalesces a
+  /// storm of empty-bucket events (one per evicted node) into one refresh per
+  /// bucket per microtask, instead of a full table fan-out each time.
+  final Set<int> _pendingRefresh = <int>{};
+
   int? _cleanNodeTime;
 
   final _xorToken = Uint8List(4);
@@ -104,6 +114,7 @@ class DHT {
     _announceTable.clear();
     _newPeerHandler.clear();
     _errorHandler.clear();
+    _pendingRefresh.clear();
     _tokenGenerateTimer?.cancel();
     _tokenGenerateTimer = null;
     _port = null;
@@ -143,7 +154,9 @@ class DHT {
 
   bool _canAdd(ID id) {
     if (id == _root!.id) return false;
-    var node = _root!.findNode(id);
+    // O(1) membership index instead of the recursive bit-tree walk; this runs
+    // per inbound datagram.
+    var node = _root!.indexOf(id);
     if (node == null) {
       var b = _root!.getIDBelongBucket(id);
       if (b == null || b.isNotFull) {
@@ -159,7 +172,7 @@ class DHT {
     if (_canAdd(id)) {
       _tryToGetNode(address, port);
     } else {
-      var node = _root!.findNode(id);
+      var node = _root!.indexOf(id);
       node?.resetCleanupTimer();
     }
   }
@@ -171,7 +184,7 @@ class DHT {
     if (_canAdd(id)) {
       _tryToGetNode(address, port);
     } else {
-      var node = _root!.findNode(id);
+      var node = _root!.indexOf(id);
       node?.resetCleanupTimer();
     }
   }
@@ -210,7 +223,19 @@ class DHT {
     _fireFoundNewPeer(peer, infoHashStr);
   }
 
-  void _allFindNode(int index) {
+  void _allFindNode(int bucketIndex) {
+    // Coalesce: collapse repeated empty events for the same bucket (e.g. a
+    // burst of timeouts emptying one bucket) into a single refresh scheduled on
+    // the next microtask. Without this each event triggered a full table scan.
+    if (!_pendingRefresh.add(bucketIndex)) return;
+    scheduleMicrotask(() {
+      if (!_pendingRefresh.remove(bucketIndex)) return;
+      if (_root == null) return;
+      _doRefreshBucket(bucketIndex);
+    });
+  }
+
+  void _doRefreshBucket(int index) {
     index = 159 - index;
     var id = ID.randomID(20);
     var n = index ~/ 8; //相同数字个数
@@ -243,10 +268,14 @@ class DHT {
       newId[i] = r.nextInt(256);
     }
     var nid = ID.createID(newId);
-    // print('bucket $index 全部清空，查询对应节点 ${nid.toString()}');
+    // Hoist the target-id string out of the per-node loop and cap the fan-out.
+    var nidStr = nid.toString();
+    var queried = 0;
     _root?.forEach((node) {
+      if (queried >= _maxRefreshNodes) return;
       node.queried = false;
-      _tryToGetNode(node.address, node.port, nid.toString());
+      _tryToGetNode(node.address, node.port, nidStr);
+      queried++;
     });
   }
 
@@ -281,7 +310,7 @@ class DHT {
       // 不放过任何一个机会
       _tryToGetNode(address, port);
     } else {
-      var node = _root!.findNode(qid);
+      var node = _root!.indexOf(qid);
       node?.resetCleanupTimer();
     }
     var infohash = data['info_hash'] as List<int>?;
@@ -302,7 +331,7 @@ class DHT {
   void _processGetPeersResponse(
       List<int> idBytes, InternetAddress address, int port, dynamic data) {
     var qid = ID.createID(idBytes, 0, 20);
-    var node = _root!.findNode(qid);
+    var node = _root!.indexOf(qid);
     if (node == null) return;
     node.resetCleanupTimer();
     String? token;
@@ -367,7 +396,7 @@ class DHT {
       // 不放过任何一个机会
       _tryToGetNode(address, port);
     } else {
-      var node = _root!.findNode(qid);
+      var node = _root!.indexOf(qid);
       node?.resetCleanupTimer();
     }
     var target = data[targetKey];
@@ -385,7 +414,7 @@ class DHT {
       List<int> idBytes, InternetAddress address, int port, dynamic data) {
     var qid = ID.createID(idBytes, 0, 20);
     if (qid == _root!.id) return;
-    var node = _root!.findNode(qid);
+    var node = _root!.indexOf(qid);
     node?.resetCleanupTimer();
     if (node != null && node.queried) {
       // 如果节点已经在本地网络中并且findnode过，就不再会对获得的nodes进行处理
@@ -421,7 +450,7 @@ class DHT {
 
   List<Node>? _findClosestNode(List<int> idBytes) {
     var id = ID.createID(idBytes, 0, 20);
-    var node = _root!.findNode(id);
+    var node = _root!.indexOf(id);
     List<Node>? nodes;
     if (node == null) {
       nodes = _root!.findClosestNodes(id);
