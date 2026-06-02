@@ -341,9 +341,9 @@ void main() {
       expect(String.fromCharCodes(obj['t']), tid);
       expect(String.fromCharCodes(obj['r']['id']), nid);
 
-      // bencode_dart ships strings as UTF-8, so the binary compact-info blob
-      // comes back UTF-8-encoded; recover the original latin1 bytes first.
-      final nodeBytes = _recoverBinary(obj['r']['nodes'] as List<int>);
+      // Compact node info is binary carried as a byte-container String;
+      // bencode_dart preserves it 1:1, so the blob comes back byte-exact.
+      final nodeBytes = obj['r']['nodes'] as List<int>;
       expect(nodeBytes.length, 26 * nodes.length);
 
       final decoded = <Node>[];
@@ -403,8 +403,8 @@ void main() {
       final values = obj['r']['values'] as List;
       expect(values.length, n);
       for (var i = 0; i < values.length; i++) {
-        // Recover the original 6 latin1 bytes (UTF-8-mangled on the wire).
-        final bytes = _recoverBinary(values[i] as List<int>);
+        // Byte-container String is preserved 1:1, so the 6 bytes come back as-is.
+        final bytes = values[i] as List<int>;
         final parsed = CompactAddress.parseIPv4Address(bytes)!;
         expect(parsed.addressString, peers[i].addressString);
         expect(parsed.port, peers[i].port);
@@ -434,10 +434,11 @@ void main() {
       expect(String.fromCharCodes(obj['e'][1]), 'Generic Error');
     });
 
-    // Documents a known interop caveat: KRPC carries binary (node ids, compact
-    // info) as Dart strings, and bencode_dart UTF-8-encodes strings. So bytes
-    // >= 0x80 are widened on the wire and must be recovered before parsing.
-    test('binary-in-string is UTF-8 widened by bencode (known caveat)', () {
+    // KRPC carries binary (node ids, compact info) as Dart strings built via
+    // String.fromCharCodes(bytes). bencode_dart preserves such byte-container
+    // strings 1:1, so a 6-byte compact address (with a byte >= 0x80) stays
+    // exactly 6 bytes on the wire — byte-exact interop, no recovery needed.
+    test('binary-in-string compact address is preserved byte-exactly', () {
       final addr =
           CompactAddress(InternetAddress.tryParse('128.2.1.3')!, 12311);
       final original = latin1.encode(addr.toContactEncodingString()!);
@@ -447,13 +448,8 @@ void main() {
               getPeersResponse(_ascii(2), _ascii(_idLen), 'tok', peers: [addr])!)
           as Map;
       final onWire = (obj['r']['values'] as List).first as List<int>;
-      expect(onWire.length, greaterThan(6)); // widened
-      expect(_recoverBinary(onWire), original); // recoverable
+      expect(onWire.length, 6); // not widened
+      expect(onWire, original); // byte-exact
     });
   });
 }
-
-/// Reverses bencode_dart's UTF-8 string encoding to recover the original
-/// latin1 byte sequence that the KRPC layer fed in as a Dart string.
-List<int> _recoverBinary(List<int> utf8Bytes) =>
-    latin1.encode(utf8.decode(utf8Bytes));
