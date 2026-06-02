@@ -60,11 +60,9 @@ class DHT {
   /// send any request to remote until the old request was reponse or timeout to reduce the `queries_number`.
   Future bootstrap(
       {int cleanNodeTime = 15 * 60,
-      int udpTimeout = TIME_OUT_TIME,
+      int udpTimeout = timeOutTimeDefault,
       int maxQeury = 24}) async {
     _cleanNodeTime = cleanNodeTime;
-    assert(_cleanNodeTime != null && udpTimeout != null && maxQeury != null,
-        'incorrect parameters');
     _generateXorToken();
     _tokenGenerateTimer?.cancel();
     _tokenGenerateTimer = Timer.periodic(Duration(minutes: 10), (timer) {
@@ -89,9 +87,9 @@ class DHT {
     _root ??=
         Node(id, CompactAddress(InternetAddress.anyIPv4, _krpc!.port), -1, 8);
     _root!.onBucketEmpty(_allFindNode);
-    _defaultBootstrapNodes.forEach((url) {
+    for (var url in _defaultBootstrapNodes) {
       addBootstrapNode(url);
-    });
+    }
     return _port;
   }
 
@@ -124,9 +122,9 @@ class DHT {
   }
 
   void _fireError(InternetAddress address, int port, int code, String msg) {
-    _errorHandler.forEach((handler) {
+    for (var handler in _errorHandler) {
       Timer.run(() => handler(code, msg));
-    });
+    }
   }
 
   bool onNewPeer(NewPeerHandler handler) {
@@ -138,9 +136,9 @@ class DHT {
   }
 
   void _fireFoundNewPeer(CompactAddress peer, String infoHash) {
-    _newPeerHandler.forEach((handler) {
+    for (var handler in _newPeerHandler) {
       Timer.run(() => handler(peer, infoHash));
-    });
+    }
   }
 
   bool _canAdd(ID id) {
@@ -180,22 +178,21 @@ class DHT {
 
   void _processAnnouncePeerRequest(List<int> idBytes, String tid,
       InternetAddress address, int port, dynamic data) {
-    var infoHash = data['info_hash'] as List<int>;
+    var infoHash = data['info_hash'] as List<int>?;
     if (infoHash == null || infoHash.length != 20) {
       _krpc?.error(tid, address, port, 203, 'Bad InfoHash');
       return;
     }
-    var token = data[TOKEN_KEY];
+    var token = data[tokenKey];
     if (token == null || token.length != 4 || !_validateToken(token, address)) {
       _krpc?.error(tid, address, port, 203, 'Bad token');
       return;
     }
     var infoHashStr = String.fromCharCodes(infoHash);
-    _resourceTable[infoHashStr] ??= Queue<CompactAddress>();
-    var peers = _resourceTable[infoHashStr];
+    var peers = _resourceTable[infoHashStr] ??= Queue<CompactAddress>();
     CompactAddress peer;
-    var implied_port = data['implied_port'];
-    if (implied_port != null && implied_port != 0) {
+    var impliedPort = data['implied_port'];
+    if (impliedPort != null && impliedPort != 0) {
       peer = CompactAddress(address, port);
     } else {
       var peerPort = data['port'];
@@ -206,13 +203,11 @@ class DHT {
       }
       peer = CompactAddress(address, peerPort);
     }
-    if (peer != null) {
-      peers!.addLast(peer);
-      if (peers!.length > _maxPeerNum) {
-        peers!.removeFirst();
-      }
-      _fireFoundNewPeer(peer, infoHashStr);
+    peers.addLast(peer);
+    if (peers.length > _maxPeerNum) {
+      peers.removeFirst();
     }
+    _fireFoundNewPeer(peer, infoHashStr);
   }
 
   void _allFindNode(int index) {
@@ -289,7 +284,7 @@ class DHT {
       var node = _root!.findNode(qid);
       node?.resetCleanupTimer();
     }
-    var infohash = data['info_hash'] as List<int>;
+    var infohash = data['info_hash'] as List<int>?;
     if (infohash == null || infohash.length != 20) {
       _krpc?.error(tid, address, port, 203, 'invalid arguments');
       return;
@@ -310,8 +305,8 @@ class DHT {
     var node = _root!.findNode(qid);
     if (node == null) return;
     node.resetCleanupTimer();
-    var token;
-    if (data[TOKEN_KEY] != null) {
+    String? token;
+    if (data[tokenKey] != null) {
       token = String.fromCharCodes(data['token']);
     }
     if (token == null) {
@@ -335,11 +330,11 @@ class DHT {
         _krpc?.announcePeer(infoHash, peerPort, token, address, port);
       }
     }
-    if (data[NODES_KEY] != null) {
+    if (data[nodesKey] != null) {
       _processFindNodeResponse(idBytes, address, port, data);
     }
-    if (data[VALUES_KEY] != null) {
-      var peers = data[VALUES_KEY];
+    if (data[valuesKey] != null) {
+      var peers = data[valuesKey];
       peers.forEach((peer) {
         try {
           if (peer is List<int>) {
@@ -375,7 +370,7 @@ class DHT {
       var node = _root!.findNode(qid);
       node?.resetCleanupTimer();
     }
-    var target = data[TARGET_KEY];
+    var target = data[targetKey];
     if (target == null || target.length != 20) {
       _krpc?.error(tid, address, port, 203, 'invalid arguments');
       return;
@@ -401,12 +396,12 @@ class DHT {
     if (_root!.add(node)) {
       if (_announceTable.keys.isNotEmpty) {
         // 新加入节点去请求peers
-        _announceTable.keys.forEach((infoHash) {
-          _requestGetPeers(node!, infoHash);
-        });
+        for (var infoHash in _announceTable.keys) {
+          _requestGetPeers(node, infoHash);
+        }
       }
     }
-    var nodes = data[NODES_KEY] as List<int>?;
+    var nodes = data[nodesKey] as List<int>?;
     if (nodes == null) return;
     for (var i = 0; i < nodes.length; i += 26) {
       try {
@@ -427,7 +422,7 @@ class DHT {
   List<Node>? _findClosestNode(List<int> idBytes) {
     var id = ID.createID(idBytes, 0, 20);
     var node = _root!.findNode(id);
-    var nodes;
+    List<Node>? nodes;
     if (node == null) {
       nodes = _root!.findClosestNodes(id);
     } else {
@@ -465,7 +460,7 @@ class DHT {
   void announce(String? infohash, int port) {
     assert(
         infohash != null && infohash.length == 20, 'Incorrect infohash string');
-    assert(port != null && port <= 65535 && port >= 0, 'Incorrect port');
+    assert(port <= 65535 && port >= 0, 'Incorrect port');
     _announceTable[infohash!] = port;
     _root?.forEach((node) {
       if (node.announced[infohash] != null && node.announced[infohash]!) return;
@@ -508,9 +503,9 @@ class DHT {
     } else {
       try {
         var ips = await InternetAddress.lookup(host);
-        ips.forEach((ip) {
+        for (var ip in ips) {
           _tryToGetNode(ip, port);
-        });
+        }
       } catch (e) {
         log('lookup host error:', error: e, name: runtimeType.toString());
       }

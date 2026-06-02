@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dart-lang/setup-dart@v1
+
+      - name: Clone sibling deps
+        run: |
+          git clone --depth 1 \
+            https://github.com/xhns/bencode_dart.git \
+            "$GITHUB_WORKSPACE/../bencode_dart"
+          git clone --depth 1 \
+            https://github.com/xhns/dartorrent_common.git \
+            "$GITHUB_WORKSPACE/../dartorrent_common"
+
+      - name: Install dependencies
+        run: dart pub get
+
+      - name: Analyze
+        run: dart analyze --fatal-infos
+
+      - name: Run tests
+        run: dart test

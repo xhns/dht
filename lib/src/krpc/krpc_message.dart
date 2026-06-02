@@ -24,44 +24,44 @@ import '../kademlia/node.dart';
 /// followed by a two character version identifier.
 ///
 
-const TRANSACTION_KEY = 't';
-const METHOD_KEY = 'y';
-const QUERY_KEY = 'q';
-const RESPONSE_KEY = 'r';
-const ERROR_KEY = 'e';
-const ARGUMENTS_KEY = 'a';
-const ID_KEY = 'id';
-const TARGET_KEY = 'target';
-const NODES_KEY = 'nodes';
-const VALUES_KEY = 'values';
-const INFO_HASH_KEY = 'info_hash';
-const TOKEN_KEY = 'token';
+const transactionKey = 't';
+const methodKey = 'y';
+const queryKey = 'q';
+const responseKey = 'r';
+const errorKey = 'e';
+const argumentsKey = 'a';
+const idKey = 'id';
+const targetKey = 'target';
+const nodesKey = 'nodes';
+const valuesKey = 'values';
+const infoHashKey = 'info_hash';
+const tokenKey = 'token';
 
-const PING = 'ping';
-const FIND_NODE = 'find_node';
-const GET_PEERS = 'get_peers';
-const ANNOUNCE_PEER = 'announce_peer';
+const methodPing = 'ping';
+const methodFindNode = 'find_node';
+const methodGetPeers = 'get_peers';
+const methodAnnouncePeer = 'announce_peer';
 
-const QUERY_KEYS = [PING, FIND_NODE, GET_PEERS];
+const queryKeys = [methodPing, methodFindNode, methodGetPeers];
 
 /// [transactionId] should be encoded as a short string of binary numbers, typically
 ///  2 characters are enough as they cover 2^16 outstanding queries.
 Uint8List? queryMessage(String transactionId, String method, Map arguments) {
   assert(transactionId.length == 2, 'Transaction ID length should be 2');
   var message = {
-    TRANSACTION_KEY: transactionId,
-    METHOD_KEY: QUERY_KEY,
-    QUERY_KEY: method,
-    ARGUMENTS_KEY: arguments
+    transactionKey: transactionId,
+    methodKey: queryKey,
+    queryKey: method,
+    argumentsKey: arguments
   };
   return bencoder.encode(message);
 }
 
 Uint8List? responseMessage(String transactionId, Map response) {
   var message = {
-    TRANSACTION_KEY: transactionId,
-    METHOD_KEY: RESPONSE_KEY,
-    RESPONSE_KEY: response
+    transactionKey: transactionId,
+    methodKey: responseKey,
+    responseKey: response
   };
   return bencoder.encode(message);
 }
@@ -69,9 +69,9 @@ Uint8List? responseMessage(String transactionId, Map response) {
 /// `error = {"t":"aa", "y":"e", "e":[201, "A Generic Error Ocurred"]}`
 Uint8List? errorMessage(String transactionId, int code, String errorMsg) {
   var message = {
-    TRANSACTION_KEY: transactionId,
-    METHOD_KEY: ERROR_KEY,
-    ERROR_KEY: [code, errorMsg]
+    transactionKey: transactionId,
+    methodKey: errorKey,
+    errorKey: [code, errorMsg]
   };
   return bencoder.encode(message);
 }
@@ -82,19 +82,19 @@ Uint8List? errorMessage(String transactionId, int code, String errorMsg) {
 ///
 /// [nodeId] is 20 length string,[transactionId] is 2 length string
 Uint8List? pingMessage(String transactionId, String nodeId) {
-  return queryMessage(transactionId, PING, {ID_KEY: nodeId});
+  return queryMessage(transactionId, methodPing, {idKey: nodeId});
 }
 
 /// `response: {"id" : "<queried nodes id>"}`
 Uint8List? pongMessage(String transactionId, String nodeId) {
-  return responseMessage(transactionId, {ID_KEY: nodeId});
+  return responseMessage(transactionId, {idKey: nodeId});
 }
 
 /// `arguments:  {"id" : "<querying nodes id>", "target" : "<id of target node>"}`
 Uint8List? findNodeMessage(
     String transactionId, String nodeId, String targetId) {
   return queryMessage(
-      transactionId, FIND_NODE, {ID_KEY: nodeId, TARGET_KEY: targetId});
+      transactionId, methodFindNode, {idKey: nodeId, targetKey: targetId});
 }
 
 /// `response: {"id" : "<queried nodes id>", "nodes" : "<compact node info>"}`
@@ -104,44 +104,44 @@ Uint8List? findNodeMessage(
 /// has the compact IP-address/port info concatenated to the end.
 Uint8List? findNodeResponse(
     String transactionId, String nodeId, Iterable<Node>? nodes) {
-  if(nodes == null){
+  if (nodes == null) {
     return null;
   }
   var nodesStr = nodes.fold('', (previousValue, node) {
-    return '${previousValue}${node.toContactEncodingString()}';
+    return '$previousValue${node.toContactEncodingString()}';
   });
-  return responseMessage(transactionId, {ID_KEY: nodeId, NODES_KEY: nodesStr});
+  return responseMessage(transactionId, {idKey: nodeId, nodesKey: nodesStr});
 }
 
 /// `arguments:  {"id" : "<querying nodes id>", "info_hash" : "<20-byte infohash of target torrent>"}`
 Uint8List? getPeersMessage(
     String transactionId, String nodeId, String infoHash) {
   return queryMessage(
-      transactionId, GET_PEERS, {ID_KEY: nodeId, INFO_HASH_KEY: infoHash});
+      transactionId, methodGetPeers, {idKey: nodeId, infoHashKey: infoHash});
 }
 
 /// response : `{"id" : "<queried nodes id>", "token" :"<opaque write token>", "values" : ["<peer 1 info string>", "<peer 2 info string>"],"nodes" : "<compact node info>"}`
 Uint8List? getPeersResponse(String transactionId, String nodeId, String token,
     {Iterable<Node>? nodes, Iterable<CompactAddress>? peers}) {
-  var nodesStr;
+  String? nodesStr;
   if (nodes != null && nodes.isNotEmpty) {
     nodesStr = nodes.fold('', (previousValue, node) {
-      return '${previousValue}${node.toContactEncodingString()}';
+      return '$previousValue${node.toContactEncodingString()}';
     });
   }
-  var values;
+  List<String?>? values;
   if (peers != null && peers.isNotEmpty) {
-    values = <String>[];
-    peers.forEach((peer) {
+    values = <String?>[];
+    for (var peer in peers) {
       values.add(peer.toContactEncodingString());
-    });
+    }
   }
-  var r = <String, dynamic>{ID_KEY: nodeId, 'token': token};
+  var r = <String, dynamic>{idKey: nodeId, 'token': token};
   if (nodesStr != null) {
-    r[NODES_KEY] = nodesStr;
+    r[nodesKey] = nodesStr;
   }
   if (values != null) {
-    r[VALUES_KEY] = values;
+    r[valuesKey] = values;
   }
   return responseMessage(transactionId, r);
 }
@@ -156,16 +156,16 @@ arguments:  {"id" : "<querying nodes id>",
 Uint8List? announcePeerMessage(String transactionId, String nodeId,
     String infoHash, int port, String token,
     [bool impliedPort = true]) {
-  return queryMessage(transactionId, ANNOUNCE_PEER, {
+  return queryMessage(transactionId, methodAnnouncePeer, {
     'implied_port': impliedPort ? 1 : 0,
-    ID_KEY: nodeId,
-    INFO_HASH_KEY: infoHash,
+    idKey: nodeId,
+    infoHashKey: infoHash,
     'port': port,
-    TOKEN_KEY: token
+    tokenKey: token
   });
 }
 
 /// `response: {"id" : "<queried nodes id>"}`
 Uint8List? announcePeerResponse(String transactionId, String nodeId) {
-  return responseMessage(transactionId, {ID_KEY: nodeId});
+  return responseMessage(transactionId, {idKey: nodeId});
 }

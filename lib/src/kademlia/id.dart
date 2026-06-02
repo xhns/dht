@@ -2,18 +2,16 @@ import 'dart:math';
 
 import 'distance.dart';
 
-const BASE_NUM = 128;
+const baseNum = 128;
 
 /// A ID with any length bytes array
 class ID {
-  List<int> _ids = List<int>.filled(20, 0);
+  final List<int> _ids;
 
   String? _str;
 
   /// [byteLength] is the bytes size , default is 20
-  ID([int byteLength = 20]) {
-    _ids = List<int>.filled(byteLength, 0);
-  }
+  ID([int byteLength = 20]) : _ids = List<int>.filled(byteLength, 0);
 
   int get byteLength => _ids.length;
 
@@ -53,7 +51,7 @@ class ID {
   int differentLength(ID ids) {
     if (ids.byteLength != byteLength) throw 'ID Different Length';
     var lrp = _ids.length * 8;
-    var base = BASE_NUM;
+    var base = baseNum;
     for (var i = 0; i < _ids.length; i++) {
       var xor = _ids[i] ^ ids.getValueAt(i);
       if (xor != 0) {
@@ -99,10 +97,10 @@ class ID {
   int get hashCode => toString().hashCode;
 
   @override
-  bool operator ==(a) {
-    if (a is ID) {
-      if (a.byteLength == byteLength) {
-        var l = differentLength(a);
+  bool operator ==(Object other) {
+    if (other is ID) {
+      if (other.byteLength == byteLength) {
+        var l = differentLength(other);
         return l == 0;
       }
     }
